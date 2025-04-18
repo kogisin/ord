@@ -283,7 +283,7 @@ impl Server {
           "/r/undelegated-content/{inscription_id}",
           get(r::undelegated_content),
         )
-        .route("/r/utxo/{outpoint}", get(Self::utxo));
+        .route("/r/utxo/{outpoint}", get(r::utxo));
 
       let proxiable_routes = Router::new()
         .route("/content/{inscription_id}", get(r::content))
@@ -767,6 +767,7 @@ impl Server {
       } else {
         OutputHtml {
           chain: server_config.chain,
+          confirmations: output_info.confirmations,
           inscriptions: output_info.inscriptions,
           outpoint,
           output: txout,
@@ -777,22 +778,6 @@ impl Server {
         .page(server_config)
         .into_response()
       })
-    })
-  }
-
-  async fn utxo(
-    Extension(index): Extension<Arc<Index>>,
-    Path(outpoint): Path<OutPoint>,
-  ) -> ServerResult {
-    task::block_in_place(|| {
-      Ok(
-        Json(
-          index
-            .get_utxo_recursive(outpoint)?
-            .ok_or_not_found(|| format!("output {outpoint}"))?,
-        )
-        .into_response(),
-      )
     })
   }
 
@@ -957,7 +942,7 @@ impl Server {
           StatusCode::NOT_FOUND.into_response()
         } else {
           let unlock = if let Some(height) = rune.unlock_height(server_config.chain.network()) {
-            Some((height, index.block_time(height)?.timestamp()))
+            Some((height, index.block_time(height)?))
           } else {
             None
           };
@@ -1477,6 +1462,11 @@ impl Server {
         .get_inscription_by_id(inscription_id)?
         .ok_or_not_found(|| format!("inscription {inscription_id}"))?;
 
+      let inscription_number = index
+        .get_inscription_entry(inscription_id)?
+        .ok_or_not_found(|| format!("inscription {inscription_id}"))?
+        .inscription_number;
+
       if let Some(delegate) = inscription.delegate() {
         inscription = index
           .get_inscription_by_id(delegate)?
@@ -1496,22 +1486,37 @@ impl Server {
       let content_security_policy = server_config.preview_content_security_policy(media)?;
 
       match media {
-        Media::Audio => {
-          Ok((content_security_policy, PreviewAudioHtml { inscription_id }).into_response())
-        }
+        Media::Audio => Ok(
+          (
+            content_security_policy,
+            PreviewAudioHtml {
+              inscription_id,
+              inscription_number,
+            },
+          )
+            .into_response(),
+        ),
         Media::Code(language) => Ok(
           (
             content_security_policy,
             PreviewCodeHtml {
               inscription_id,
               language,
+              inscription_number,
             },
           )
             .into_response(),
         ),
-        Media::Font => {
-          Ok((content_security_policy, PreviewFontHtml { inscription_id }).into_response())
-        }
+        Media::Font => Ok(
+          (
+            content_security_policy,
+            PreviewFontHtml {
+              inscription_id,
+              inscription_number,
+            },
+          )
+            .into_response(),
+        ),
         Media::Iframe => unreachable!(),
         Media::Image(image_rendering) => Ok(
           (
@@ -1519,6 +1524,7 @@ impl Server {
             PreviewImageHtml {
               image_rendering,
               inscription_id,
+              inscription_number,
             },
           )
             .into_response(),
@@ -1526,23 +1532,54 @@ impl Server {
         Media::Markdown => Ok(
           (
             content_security_policy,
-            PreviewMarkdownHtml { inscription_id },
+            PreviewMarkdownHtml {
+              inscription_id,
+              inscription_number,
+            },
           )
             .into_response(),
         ),
-        Media::Model => {
-          Ok((content_security_policy, PreviewModelHtml { inscription_id }).into_response())
-        }
-        Media::Pdf => {
-          Ok((content_security_policy, PreviewPdfHtml { inscription_id }).into_response())
-        }
-        Media::Text => {
-          Ok((content_security_policy, PreviewTextHtml { inscription_id }).into_response())
-        }
+        Media::Model => Ok(
+          (
+            content_security_policy,
+            PreviewModelHtml {
+              inscription_id,
+              inscription_number,
+            },
+          )
+            .into_response(),
+        ),
+        Media::Pdf => Ok(
+          (
+            content_security_policy,
+            PreviewPdfHtml {
+              inscription_id,
+              inscription_number,
+            },
+          )
+            .into_response(),
+        ),
+        Media::Text => Ok(
+          (
+            content_security_policy,
+            PreviewTextHtml {
+              inscription_id,
+              inscription_number,
+            },
+          )
+            .into_response(),
+        ),
         Media::Unknown => Ok((content_security_policy, PreviewUnknownHtml).into_response()),
-        Media::Video => {
-          Ok((content_security_policy, PreviewVideoHtml { inscription_id }).into_response())
-        }
+        Media::Video => Ok(
+          (
+            content_security_policy,
+            PreviewVideoHtml {
+              inscription_id,
+              inscription_number,
+            },
+          )
+            .into_response(),
+        ),
       }
     })
   }
@@ -2900,7 +2937,7 @@ mod tests {
         rune: Rune(0),
         unlock: Some((
           Height(209999),
-          DateTime::from_timestamp(125998800, 0).unwrap(),
+          Blocktime::Expected(DateTime::from_timestamp(125998800, 0).unwrap()),
         )),
       },
     );
@@ -3386,6 +3423,7 @@ mod tests {
         value: 5000000000,
         script_pubkey: address.script_pubkey(),
         address: Some(uncheck(&address)),
+        confirmations: 1,
         transaction: txid,
         sat_ranges: None,
         indexed: true,
@@ -3674,6 +3712,7 @@ mod tests {
   <dt>value</dt><dd>5000000000</dd>
   <dt>script pubkey</dt><dd class=monospace>OP_PUSHBYTES_65 [[:xdigit:]]{{130}} OP_CHECKSIG</dd>
   <dt>transaction</dt><dd><a class=collapse href=/tx/{txid}>{txid}</a></dd>
+  <dt>confirmations</dt><dd>1</dd>
   <dt>spent</dt><dd>false</dd>
 </dl>
 <h2>1 Sat Range</h2>
@@ -3696,6 +3735,7 @@ mod tests {
   <dt>value</dt><dd>5000000000</dd>
   <dt>script pubkey</dt><dd class=monospace>OP_PUSHBYTES_65 [[:xdigit:]]{{130}} OP_CHECKSIG</dd>
   <dt>transaction</dt><dd><a class=collapse href=/tx/{txid}>{txid}</a></dd>
+  <dt>confirmations</dt><dd>1</dd>
   <dt>spent</dt><dd>false</dd>
 </dl>.*"
       ),
@@ -3719,6 +3759,7 @@ mod tests {
   <dt>value</dt><dd>5000000000</dd>
   <dt>script pubkey</dt><dd class=monospace></dd>
   <dt>transaction</dt><dd><a class=collapse href=/tx/{txid}>{txid}</a></dd>
+  <dt>confirmations</dt><dd>0</dd>
   <dt>spent</dt><dd>false</dd>
 </dl>
 <h2>1 Sat Range</h2>
@@ -4366,7 +4407,10 @@ mod tests {
         format!("/preview/{}", inscription_id),
         StatusCode::OK,
         "default-src 'self'",
-        format!(".*<html lang=en data-inscription={}>.*", inscription_id),
+        format!(
+          ".*<html lang=en data-inscription={}>.*<title>Inscription 0 Preview</title>.*",
+          inscription_id
+        ),
       );
     }
 
